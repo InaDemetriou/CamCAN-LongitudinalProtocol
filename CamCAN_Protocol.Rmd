@@ -1,0 +1,1016 @@
+---
+title: "CamCAN Selectivity & Attrition Analysis (for *The Cambridge Centre for Ageing and Neuroscience (Cam-CAN) longitudinal study protocol: Phase 4 (Enrichment) and Phase 5 (Rescan)*)"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+date: "2026-05-15"
+author: Ina Demetriou & Richard Henson 
+---
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(grid)
+library(cowplot)
+library(GGally)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(tidyverse)
+library(isotree)
+library(lmerTest)
+library(irr)
+library(gt)
+```
+
+#Plotting function helper 
+```{r}
+plot_normality <- function(data, column_name) {
+  column_data <- data[[column_name]]
+  data_clean <- na.omit(column_data)
+    density_estimate <- density(data_clean)
+    normal_max <- dnorm(mean(data_clean), mean = mean(data_clean), sd = sd(data_clean))
+    ylim_max <- max(density_estimate$y, normal_max)
+    hist(data_clean,  main = NA, xlab = column_name, ylab = "Density", 
+         breaks = 20, col = "skyblue", border = "white", probability = TRUE,
+         ylim = c(0, ylim_max * 1.1),
+         las = 1) 
+    lines(density_estimate, col = "blue", lwd = 2, lty = 1)
+    curve(dnorm(x, mean = mean(data_clean), sd = sd(data_clean)), 
+          col = "red", lwd = 2, lty = 2, add = TRUE)
+    legend("topright", inset = c(0, -0.2), legend = c("Density", "Normal Distribution"), col = c("blue", "red"), lwd = 2, bty = "n", bg = "white", xpd = TRUE)
+}
+
+plot_violin <- function(data, column_name, group_column) {
+  # Remove missing values and prepare the data
+  data_clean <- data[!is.na(data[[column_name]]) & !is.na(data[[group_column]]), ]
+  data_clean[[column_name]] <- scale(data_clean[[column_name]])
+  # Create violin plot with grouping
+  ggplot(data_clean, aes_string(x = group_column, y = column_name, fill = group_column)) +
+    geom_violin(trim = FALSE, alpha = 0.7) +
+    geom_boxplot(width = 0.1, position = position_dodge(0.9), alpha = 0.5 ) +
+    scale_fill_manual(
+      values = c("0" = "lightblue", "1" = "darkorange")  # Custom colors
+    ) +
+    ylim(-4, 4) +
+    scale_x_discrete(labels = c("0" = "NR", "1" = "R")) +  # Relabel x-axis
+    labs(x = NULL, y = column_name) +  # Remove legend title
+    theme_minimal() +
+    theme(legend.position = "none")  # Remove the legend
+}
+
+plot_violin_outlier_suppress <- function(data, column_name, group_column) {
+  # Remove missing values and prepare the data
+  data_clean <- data[!is.na(data[[column_name]]) & !is.na(data[[group_column]]), ]
+  data_clean[[column_name]] <- scale(data_clean[[column_name]])
+  # Create violin plot with grouping
+  ggplot(data_clean, aes_string(x = group_column, y = column_name, fill = group_column)) +
+    geom_violin(trim = FALSE, alpha = 0.7) +
+    geom_boxplot(width = 0.1, position = position_dodge(0.9), alpha = 0.5, outlier.shape = NA ) +
+    scale_fill_manual(
+      values = c("0" = "lightblue", "1" = "darkorange")  # Custom colors
+    ) +
+    ylim(-3.5, 3.5) +
+    scale_x_discrete(labels = c("0" = "NR", "1" = "R")) +  # Relabel x-axis
+    labs(x = NULL, y = column_name) +  # Remove legend title
+    theme_minimal() +
+    theme(legend.position = "none")  # Remove the legend
+}
+plot_outliers <- function(data, x_var, y_var, x_label, y_label, ymin, ymax, outliers) {
+  outlier_CCIDs <- unique(outliers$CC.ID)
+  data <- data %>%
+    mutate(is_outlier = ifelse(CC.ID %in% outlier_CCIDs, TRUE, FALSE))
+  
+  ggplot(data, aes(x = .data[[x_var]], y = .data[[y_var]])) +
+    geom_point(aes(color = is_outlier, alpha = is_outlier), size = 2, stroke = 1) +
+    geom_line(aes(group = CC.ID), lty = 2, alpha = 0.2, color = "black") +
+    geom_smooth(
+      aes(group = CC.ID, color = is_outlier),
+      method = "lm", se = FALSE, size = 0.5, lty = 1
+    ) +
+    labs(x = x_label, y = y_label) +
+    ylim(ymin, ymax) +
+    scale_color_manual(
+      values = c("TRUE" = "green", "FALSE" = "darkorange"),
+      labels = c("TRUE" = "Outlier", "FALSE" = "Non-Outlier")
+    ) +
+    scale_alpha_manual(values = c("TRUE" = 0.3, "FALSE" = 0.1), guide = "none") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "bottom",
+      legend.box = "horizontal"
+    ) +
+    guides(color = guide_legend(title = NULL))
+}
+```
+
+Mydata contains ALL cross-sectional and longitudinal data across all phases for 1) Cattell, 2) STW, 3) Memory Imm, 4) Memory Del, 5) Simple Spped (inv RT Simple), 6) Choice Speed (inv RT choice). 
+
+```{r}
+mydata <- read.csv("CambridgeCentreForAg-AllCognitiveData_DATA_2026-05-17_1254.csv")
+phase3_dates <- read.csv("CambridgeCentreForAg-PHASE3DATES_DATA_2026-05-18_1537.csv")
+```
+
+#Data wrangling 
+```{r}
+mydata$phase <- ifelse(grepl("phase_1", mydata$redcap_event_name), "1", 
+                ifelse(grepl("phase_2", mydata$redcap_event_name), "2", 
+                ifelse(grepl("phase_3", mydata$redcap_event_name), "3", 
+                ifelse(grepl("phase_4", mydata$redcap_event_name), "4",
+                ifelse(grepl("phase_5", mydata$redcap_event_name), "5", 
+                ifelse(grepl("participant_info", mydata$redcap_event_name), "999", NA))))))
+
+mydata$arm  <- ifelse(grepl("arm_1", mydata$redcap_event_name), "1", 
+               ifelse(grepl("arm_2", mydata$redcap_event_name), "2", NA))
+
+names(mydata)[names(mydata) == "record_id"] <- "CC.ID"
+names(mydata)[names(mydata) == "question_num_years_edu"] <- "education_years"
+names(mydata)[names(mydata) == "phase_cog_age"] <- "Age"
+names(mydata)[names(mydata) == "cattell_total_score"] <- "Cattell"
+names(mydata)[names(mydata) == "stw_n_correct_trials"] <- "STW"
+names(mydata)[names(mydata) == "story_memory_immediate_score"] <- "mem_imm"
+names(mydata)[names(mydata) == "story_memory_delayed_score"] <- "mem_del"
+names(mydata)[names(mydata) == "story_memory_recog_score"] <- "mem_recog"
+names(mydata)[names(mydata) == "rt_simple_inv_rt_mean"] <- "simple_speed"
+names(mydata)[names(mydata) == "rt_choice_inv_rt_mean"] <- "choice_speed"
+names(mydata)[names(mydata) == "phase_cog_online_paper"] <- "format"
+
+mydata$education_years <- as.numeric(mydata$education_years)
+
+mydata <- mydata %>%
+  group_by(CC.ID) %>%
+  mutate(education_years = {
+    val <- education_years[phase == 1 & !is.na(education_years)]
+    if (length(val) > 0) val[1] else education_years
+  }) %>%
+  ungroup()
+
+mydata <- mydata %>%
+  group_by(CC.ID) %>%
+  mutate(across(c(sex, dob, phase_code), ~ {
+    val <- .x[phase == 999 & !is.na(.x)]
+    if (length(val) > 0) val[1] else .x
+  })) %>%
+  ungroup()
+
+mydata <- mydata %>% filter(phase != 999 | is.na(phase))
+
+cog_measures <- c("Cattell", "STW", "mem_imm", "mem_del",
+                  "simple_speed", "choice_speed")
+mydata <- mydata %>% mutate(across(all_of(cog_measures), as.numeric))
+
+mydata$wave <- NA
+mydata$wave[mydata$phase == 1] <- 0
+mydata$wave[mydata$phase == 2] <- 0
+mydata$wave[mydata$phase == 4] <- 1
+mydata$wave[mydata$phase == 5] <- 2
+
+mydata$dob            <- as.Date(mydata$dob)
+mydata$phase_cog_date <- as.Date(mydata$phase_cog_date)
+mydata$Age            <- round(as.numeric((mydata$phase_cog_date - mydata$dob) / 365.25), 2)
+mydata$sex            <- as.factor(mydata$sex)
+```
+
+#REDCAP CORRECTION 
+```{r}
+mydata$mem_imm[mydata$CC.ID == 620697 & mydata$wave == 2] <- NA #REDCAP ENTRY MISTAKE 
+mydata$mem_del[mydata$CC.ID == 620697 & mydata$wave == 2] <- NA #REDCAP ENTRY MISTAKE 
+
+fix_ids   <- c(220518, 310051, 420173, 520980, 620685)
+fix_dates <- as.Date(c("2024-09-01", "2024-12-01", "2025-01-01", "2025-01-01","2025-04-01")) #REDCAP NULL  
+for (i in seq_along(fix_ids)) {
+  mydata$phase_cog_date[mydata$CC.ID == fix_ids[i] & mydata$phase == "5"] <- fix_dates[i]
+}
+mydata$phase_cog_date[mydata$CC.ID == 420435 & mydata$phase == "5"] <- NA
+
+phase3_dates$phase3_meg_date <- as.Date(phase3_dates$phase_meg_date)
+phase3_dates$phase_mri_date  <- as.Date(phase3_dates$phase_mri_date)
+phase3_dates$phase           <- ifelse(grepl("phase_3", phase3_dates$redcap_event_name), "3", NA)
+phase3_dates$CC.ID           <- phase3_dates$record_id
+
+mydata <- mydata %>% left_join(phase3_dates %>% select(CC.ID, phase3_meg_date, phase_mri_date), by = "CC.ID")
+mydata <- mydata %>% mutate(
+    phase_cog_date = if_else(
+      phase == "3",
+      pmin(phase3_meg_date, phase_mri_date, na.rm = TRUE),
+      phase_cog_date))
+```
+
+```{r}
+subject_patterns <- mydata %>%
+  mutate(
+    participated = as.integer(if_any(all_of(cog_measures), ~ !is.na(.x)))
+  ) %>%
+  group_by(CC.ID) %>%
+  summarize(
+    wave0 = as.integer(any(participated == 1 & wave == 0)),
+    wave1 = as.integer(any(participated == 1 & wave == 1)),
+    wave2 = as.integer(any(participated == 1 & wave == 2)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pattern = paste0(wave0, wave1, wave2),
+    group = case_when(
+      pattern == "100"             ~ "G1",
+      pattern == "110"             ~ "G2",
+      pattern %in% c("111", "101") ~ "G3",
+      TRUE                         ~ "Other"
+    )
+  )
+
+table(subject_patterns$pattern, useNA = "ifany")
+table(subject_patterns$group,   useNA = "ifany")
+mydata <- merge(mydata, subject_patterns, by = "CC.ID")
+
+missing_ids <- read.csv("missing_record_ids.csv")
+names(missing_ids)[names(missing_ids) == "record_id"] <- "CC.ID"
+mydata <- mydata[!mydata$CC.ID %in% missing_ids$CC.ID, ]
+mydata %>%  group_by(group) %>% summarise(n_unique = n_distinct(CC.ID, na.rm = FALSE))
+mydata$return_code <- ifelse(mydata$group == "G3", 1, 0)
+mydata$return_code <- as.factor(mydata$return_code)
+
+```
+
+```{r}
+# Attendance = non-NA phase_cog_date for that phase.
+# Each participant's set of attended phases drives which arrow they belong to.
+
+att <- mydata %>%
+  filter(!is.na(phase_cog_date), !is.na(phase)) %>%
+  mutate(phase_label = ifelse(phase == "2" & !is.na(arm),
+                              paste0("p2_arm", arm),
+                              paste0("p", phase))) %>%
+  distinct(CC.ID, phase_label) %>%
+  mutate(present = 1L) %>%
+  pivot_wider(names_from = phase_label, values_from = present, values_fill = 0L)
+
+for (col in c("p1","p2_arm1","p2_arm2","p3","p4","p5")) {
+  if (!col %in% names(att)) att[[col]] <- 0L
+}
+
+arrow_counts <- tibble::tibble(
+  arrow = c(
+    "P1 -> P4 (skipping P2 & P3)",
+    "P1 -> P2_arm2",
+    "P2_arm2 -> P4",
+    "P2_arm2 -> P5 (via P4)",
+    "P2_arm2 -> P5 (skipping P4)",
+    "P2_arm1 -> P4 (skipping P3)",
+    "P2_arm1 -> P5 (via P4, skipping P3)",
+    "P2_arm1 -> P5 (skipping P3 & P4)",
+    "P3 -> P4",
+    "P3 -> P5 (via P4)",
+    "P3 -> P5 (skipping P4)"
+  ),
+  n = c(
+    sum(att$p1 == 1 & att$p4 == 1 & att$p2_arm1 == 0 & att$p2_arm2 == 0 & att$p3 == 0),
+    sum(att$p1 == 1 & att$p2_arm2 == 1),
+    sum(att$p2_arm2 == 1 & att$p4 == 1),
+    sum(att$p2_arm2 == 1 & att$p4 == 1 & att$p5 == 1),
+    sum(att$p2_arm2 == 1 & att$p5 == 1 & att$p4 == 0),
+    sum(att$p2_arm1 == 1 & att$p4 == 1 & att$p3 == 0),
+    sum(att$p2_arm1 == 1 & att$p4 == 1 & att$p5 == 1 & att$p3 == 0),
+    sum(att$p2_arm1 == 1 & att$p5 == 1 & att$p3 == 0 & att$p4 == 0),
+    sum(att$p3 == 1 & att$p4 == 1),
+    sum(att$p3 == 1 & att$p4 == 1 & att$p5 == 1),
+    sum(att$p3 == 1 & att$p5 == 1 & att$p4 == 0)
+  )
+)
+
+totals <- tibble::tibble(
+  phase = c("P1","P2_arm1","P2_arm2","P3","P4","P5"),
+  n     = c(sum(att$p1), sum(att$p2_arm1), sum(att$p2_arm2),
+            sum(att$p3), sum(att$p4),     sum(att$p5))
+)
+
+cat("\nPhase totals (boxes on the diagram):\n"); print(totals)
+cat("\nArrow counts (paths between phases):\n"); print(arrow_counts)
+
+trajectories <- att %>%
+  mutate(path = paste0(
+    ifelse(p1 == 1, "P1-", ""),
+    ifelse(p2_arm1 == 1, "P2a1-", ""),
+    ifelse(p2_arm2 == 1, "P2a2-", ""),
+    ifelse(p3 == 1, "P3-", ""),
+    ifelse(p4 == 1, "P4-", ""),
+    ifelse(p5 == 1, "P5", "")
+  )) %>%
+  count(path, sort = TRUE)
+
+diagram_table <- tibble::tibble(
+  Section = c(rep("Phase totals (boxes)", 6),
+              rep("Arrows (pathways between phases)", 11)),
+  Label = c(
+    "Phase 1 — CC3000 Home Interviews",
+    "Phase 2 Arm 1 — CC700",
+    "Phase 2 Arm 2 — CCfrail",
+    "Phase 3 — CC280",
+    "Phase 4 — CCenrich Cognitive Testing",
+    "Phase 5 — CCrescan",
+    "Phase 1 → Phase 4 (skipping P2 & P3)",
+    "Phase 1 → Phase 2 Arm 2",
+    "Phase 2 Arm 2 → Phase 4",
+    "Phase 2 Arm 2 → Phase 5 (via P4)",
+    "Phase 2 Arm 2 → Phase 5 (skipping P4)",
+    "Phase 2 Arm 1 → Phase 4 (skipping P3)",
+    "Phase 2 Arm 1 → Phase 5 (via P4, skipping P3)",
+    "Phase 2 Arm 1 → Phase 5 (skipping P3 & P4)",
+    "Phase 3 → Phase 4",
+    "Phase 3 → Phase 5 (via P4)",
+    "Phase 3 → Phase 5 (skipping P4)"
+  ),
+  n = c(totals$n, arrow_counts$n)
+)
+
+gt_tbl <- diagram_table %>%
+  gt(groupname_col = "Section") %>%
+  tab_header(
+    title    = md("**CamCAN participant flow**"),
+    subtitle = "Phase totals and pathway counts"
+  ) %>%
+  cols_label(Label = "", n = "n") %>%
+  cols_align(align = "right", columns = n) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) %>%
+  tab_options(
+    table.font.size = 13,
+    heading.title.font.size = 16,
+    row_group.font.weight = "bold"
+  )
+gt_tbl
+```
+
+```{r}
+CC700 <- read.csv("CC700_CC.ID.csv")
+names(CC700)[names(CC700) == "record_id"] <- "CC.ID"
+
+mydata700 <- mydata[mydata$CC.ID %in% CC700$CC.ID, ]
+
+mydata1_R_NR <- mydata700[mydata700$phase == 1, ]
+mydata2_R_NR <- mydata700[mydata700$phase == 2, ]
+```
+
+```{r, warning=FALSE}
+p1 <- plot_violin(mydata1_R_NR, "STW", "return_code")
+p2 <- plot_violin(mydata2_R_NR, "Cattell", "return_code")
+p3 <- plot_violin(mydata1_R_NR, "mem_imm", "return_code")
+p4 <- plot_violin(mydata1_R_NR, "mem_del", "return_code")
+p5 <- plot_violin(mydata1_R_NR, "simple_speed", "return_code")
+p6 <- plot_violin(mydata1_R_NR, "choice_speed", "return_code")
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 3)
+
+#Keep raw values for variables that will be transformed 
+mydata$STW_raw <- mydata$STW
+mydata$STW     <- (mydata$STW_raw)^3
+
+#check normality after transformation 
+p1 <- plot_violin(mydata1_R_NR, "STW", "return_code")
+p2 <- plot_violin(mydata2_R_NR, "Cattell", "return_code")
+p3 <- plot_violin(mydata1_R_NR, "mem_imm", "return_code")
+p4 <- plot_violin(mydata1_R_NR, "mem_del", "return_code")
+p5 <- plot_violin(mydata1_R_NR, "simple_speed", "return_code")
+p6 <- plot_violin(mydata1_R_NR, "choice_speed", "return_code")
+
+grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 3)
+```
+
+## Plot violins without outliers
+```{r}
+# p1 <- plot_violin_outlier_suppress(mydata1_R_NR, "STW", "return_code")
+# p2 <- plot_violin_outlier_suppress(mydata2_R_NR, "Cattell", "return_code")
+# p3 <- plot_violin_outlier_suppress(mydata1_R_NR, "mem_imm", "return_code")
+# p4 <- plot_violin_outlier_suppress(mydata1_R_NR, "mem_del", "return_code")
+# p5 <- plot_violin_outlier_suppress(mydata1_R_NR, "simple_speed", "return_code")
+# p6 <- plot_violin_outlier_suppress(mydata1_R_NR, "choice_speed", "return_code")
+
+# grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 3)
+```
+
+Phase separation between Phase 1 and Phase 2 is a pratical helper due to Redcap construction. We treat cognitive variables collected in Phase 1 as Phase 2 interchangeably (due to a very short time lag). 
+
+```{r}
+mydata1_R <- mydata1_R_NR[mydata1_R_NR$group == "G3", ]
+mydata2_R <- mydata2_R_NR[mydata2_R_NR$group == "G3", ]
+
+mydata1_NR <- mydata1_R_NR[mydata1_R_NR$group != "G3" & !is.na(mydata1_R_NR$CC.ID), ]
+mydata2_NR <- mydata2_R_NR[mydata2_R_NR$group != "G3" & !is.na(mydata2_R_NR$CC.ID), ]
+```
+
+# AGE AND SEX DISTRIBUTION 
+```{r}
+summary(mydata$Age)
+table(mydata$sex)         # 2 - female #1 - male
+
+summary(mydata1_R$Age)
+summary(mydata1_NR$Age)
+
+table(mydata1_R$sex)
+table(mydata1_NR$sex)
+
+sex_ratio <- table(mydata1_R_NR$return_code, mydata1_R_NR$sex)
+print(sex_ratio)
+chisq.test(sex_ratio)
+
+m_age <- glm(return_code ~ Age, data = mydata1_R_NR, na.action = na.omit, family = binomial)
+anova(m_age, test = "Chisq")
+m_sex <- glm(return_code ~ sex, data = mydata1_R_NR, na.action = na.omit, family = binomial)
+anova(m_sex, test = "Chisq")
+m_edu <- glm(return_code ~ education_years, data = mydata1_R_NR, na.action = na.omit, family = binomial)
+anova(m_edu, test = "Chisq")
+m_full <- glm(return_code ~ sex*Age, data = mydata1_R_NR, na.action = na.omit, family = binomial)
+anova(m_full, test = "Chisq")
+```
+
+```{r, warning = FALSE}
+ggplot(mydata1_R_NR, aes(x = Age, fill = return_code)) +
+  geom_histogram(binwidth = 4, position = "dodge", color = "black", size = 0.2) +
+  labs(x = "Age", y = "N", fill = "Group") +
+  ggtitle("Baseline Age Distribution in NR and R") +
+  scale_fill_manual(values = c("lightblue", "darkorange"),
+                    labels = c("0" = "NR", "1" = "R"), name = NULL) + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 12), 
+        legend.position = "bottom") +
+  xlim(0, 110)
+
+mydata1_R <- mydata1_R %>%
+  mutate(Age = as.numeric(Age),  
+         N = ifelse(sex == 1, -1, 1)) 
+
+ggplot(mydata1_R, aes(x = Age, fill = factor(sex))) +
+  geom_histogram(data = filter(mydata1_R, sex == 1), aes(y = -..count..), 
+                 binwidth = 4, color = "black", size = 0.2, position = "identity") +
+  geom_histogram(data = filter(mydata1_R, sex == 2), aes(y = ..count..), 
+                 binwidth = 4, color = "black", size = 0.2, position = "identity") +
+  scale_fill_manual(values = c("#9BCD9B", "#FFE4E1"),
+                    labels = c("1" = "Male", "2" = "Female"), name = NULL) + 
+  labs(x = "Age", y = "N", fill = "sex") +
+  ggtitle("Age Distribution by Sex in R at a Baseline") +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5, size = 14), 
+        legend.position = "bottom") + 
+  xlim(0, 110) +
+  coord_flip() +  # Flip coordinates for a horizontal layout
+  scale_y_continuous(labels = abs, limits = c(-15, 15))  # Combine labels and limits
+```
+
+# EDUCATION  
+```{r}
+outliers_edu    <- boxplot.stats(mydata1_R_NR$education_years)$out
+outliers_edu_R  <- boxplot.stats(mydata1_R$education_years)$out
+outliers_edu_NR <- boxplot.stats(mydata1_NR$education_years)$out
+
+mydata1_R_NR$education_years[mydata1_R_NR$return_code == 1 & mydata1_R_NR$education_years %in% outliers_edu_R] <- NA
+mydata1_R_NR$education_years[mydata1_R_NR$return_code == 0 & mydata1_R_NR$education_years %in% outliers_edu_NR] <- NA
+
+wilcox.test(education_years ~ return_code, data = mydata1_R_NR)
+
+summary(mydata1_R$Education)
+summary(mydata1_NR$Education)
+
+ggplot(mydata1_R_NR, aes(x = factor(return_code), y = education_years, fill = factor(return_code))) +
+  geom_boxplot(color = "black", alpha = 0.6) +  # Box plot with some transparency
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, color = "red", fill = "white") + 
+  labs(title = "Years of Education",
+       y = "Years of Education", 
+       x = NULL) +
+  scale_fill_manual(values = c("0" = "lightblue", "1" = "darkorange"), 
+                    labels = c("0" = "NR", "1" = "R"), 
+                    name = NULL) +
+  scale_x_discrete(labels = c("0" = "NR", "1" = "R")) + 
+  theme_minimal() + 
+  theme(
+      legend.position = "bottom",
+      legend.background = element_rect(fill = "transparent", color = NA),
+      plot.title = element_text(hjust = 0.5, vjust = 3, size = 12)
+    ) + 
+  ylim(5, 20)
+```
+
+## Education selectivity 
+```{r}
+clean_data <- na.omit(mydata1_R_NR[, c("education_years", "Age", "return_code")])
+education_model <- lm(education_years ~ poly(Age,2), data = clean_data)
+clean_data$regressed_education <- residuals(education_model, na.rm = TRUE)
+
+r_residuals_ed <- clean_data$regressed_education[clean_data$return_code == "1"]
+cc700_residuals_ed <- clean_data$regressed_education
+
+(mean(r_residuals_ed) - (mean(cc700_residuals_ed)))/sd(cc700_residuals_ed)
+(mean(mydata1_R$education_years, na.rm = TRUE) - (mean(mydata1_R_NR$education_years, na.rm = TRUE)))/sd(mydata1_R_NR$education_years, na.rm = TRUE)
+
+clean_data <- na.omit(mydata1_R_NR[, c("education_years", "sex", "return_code", "Age")])
+m_education <-lm(education_years ~ return_code * poly(Age, 2), data = clean_data)
+summary(m_education)
+car::Anova(m_education, type=3)
+```
+
+# FLUID INTELLIGENCE (CATTELL) 
+```{r}
+ggplot(mydata2_R_NR, aes(x = Age, y = Cattell, color = return_code)) +
+  geom_point(alpha = 0.3) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = , size = 1) +
+  labs(x = "Age", y = "Cattell") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    panel.grid.major = element_line(color = "grey85", size = 0.5),
+    panel.grid.minor = element_line(color = "grey90", size = 0.25)
+  ) +
+  scale_color_manual(values = c("darkorange", "#570861"), labels = c("0" = "Not Returned", "1" = "Returned"), name = NULL
+)
+
+outliers_cattell_R <- boxplot.stats(mydata2_R$Cattell)$out
+outliers_cattell_NR <- boxplot.stats(mydata2_NR$Cattell)$out
+
+mydata2_R_NR$Cattell[mydata2_R_NR$return_code == 1 & mydata2_R_NR$Cattell %in% outliers_cattell_R] <- NA
+mydata2_R_NR$Cattell[mydata2_R_NR$return_code == 0 & mydata2_R_NR$Cattell %in% outliers_cattell_NR] <- NA
+
+plot_violin(mydata2_R_NR, "Cattell", "return_code")
+
+t.test(mydata2_R$Cattell, mydata2_NR$Cattell, paired = FALSE)
+wilcox.test(Cattell ~ return_code, data = mydata2_R_NR)
+```
+
+## Cattell Selectivity 
+```{r}
+clean_data <- na.omit(mydata2_R_NR[, c("Cattell", "Age", "education_years", "return_code", "sex")])
+clean_data$return_code <- as.factor(clean_data$return_code)
+clean_data$sex <- as.factor(clean_data$sex)
+
+cat_model <- lm(Cattell ~ poly(Age,2), data = clean_data)
+clean_data$regressed_cattell <- residuals(cat_model, na.rm = TRUE)
+
+returners_residuals <- clean_data$regressed_cattell[clean_data$return_code == "1"]
+cc700_residuals <- clean_data$regressed_cattell
+
+#age-orthogonal selectivity statistic
+(mean(returners_residuals) - mean(cc700_residuals)) / sd(cc700_residuals)
+
+#age-driven selectivity statistic
+(mean(mydata2_R$Cattell, na.rm = TRUE) - (mean(mydata2_R_NR$Cattell, na.rm = TRUE)))/sd(mydata2_R_NR$Cattell, na.rm = TRUE)
+
+m_cattell <-lm(Cattell ~ return_code * scale(education_years) * poly(Age, 2) * sex, data = clean_data)
+summary(m_cattell)
+car::Anova(m_cattell, type=3)
+```
+
+## Cattell Attrition (Pattern-mixture) & ICC
+```{r}
+df_cattell <- mydata %>% 
+  filter(group %in% c("G2", "G3"),
+         phase %in% c(2, 4, 5)) %>% 
+  group_by(CC.ID) %>% 
+  filter(sum(!is.na(Cattell)) >= 2) %>% 
+  ungroup()
+
+df_cattell <- df_cattell %>%
+  group_by(CC.ID) %>%
+  mutate(A0 = as.numeric(Age[wave == '0']), 
+         dA = as.numeric(Age - A0))
+
+df_cattell$prac <- 1
+df_cattell$prac[str_detect(df_cattell$wave, "0")] <- 0
+df_cattell$prac   <- factor(df_cattell$prac)
+df_cattell$format <- factor(df_cattell$format)
+df_cattell$format <- ifelse(df_cattell$wave == 0 & is.na(df_cattell$format), 1, df_cattell$format)
+
+CC.ID <- df_cattell$CC.ID[df_cattell$wave == 0]
+C0    <- df_cattell$Cattell[df_cattell$wave == 0]
+C1    <- df_cattell$Cattell[df_cattell$wave == 1]
+C2    <- df_cattell$Cattell[df_cattell$wave == 2]
+educ  <- df_cattell$education_years[df_cattell$wave == 0]
+sex   <- df_cattell$sex[df_cattell$wave == 0]
+A0    <- df_cattell$Age[df_cattell$wave == 0]
+
+feature_matrix <- data.frame(CC.ID, C0, C1, C2, A0, sex, educ)
+
+set.seed(987)
+iso <- isolation.forest(feature_matrix[, c("C0", "C1", "C2", "A0")], ntrees = 100, sample_size = 128, nthreads = 1)
+
+feature_matrix$pred <- predict(iso, feature_matrix[, c("C0", "C1", "C2", "A0")])
+outliers <- feature_matrix[feature_matrix$pred > 0.60, c("CC.ID", "C0", "C1", "C2", "A0", "pred")]
+outliers_cattell <- outliers
+
+plot_outliers(df_cattell, "Age", "Cattell", "Age", "Cattell", min(df_cattell$Cattell), max(df_cattell$Cattell), outliers = outliers_cattell)
+
+df_cattell$cattell[df_cattell$CC.ID %in% outliers_cattell$CC.ID] <- NA
+df_cattell$cattell_scaled[df_cattell$CC.ID %in% outliers_cattell$CC.ID] <- NA
+
+m_cattell = lmer('scale(Cattell) ~ scale(A0)*scale(dA)*group + scale(A0)*scale(education_years)*sex + format + prac + scale(A0):prac + (1|CC.ID)', data = df_cattell, REML = TRUE)
+summary(m_cattell)
+
+wide <- pivot_wider(df_cattell[df_cattell$group == "G3" & df_cattell$wave %in% c(0, 2),],
+  id_cols = CC.ID,
+  names_from = wave,
+  values_from = Cattell)
+mat <- wide[, -1]
+icc(mat, model = "twoway", type = "consistency", unit = "single")
+```
+
+# STW 
+```{r}
+ggplot(mydata1_R_NR, aes(x = Age, y = STW, color = return_code)) +
+  geom_point(alpha = 0.3) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = , size = 1) +
+  labs(x = "Age", y = "STW") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    panel.grid.major = element_line(color = "grey85", size = 0.5),
+    panel.grid.minor = element_line(color = "grey90", size = 0.25)
+  ) +
+  scale_color_manual(values = c("darkorange", "#570861"), labels = c("0" = "Not Returned", "1" = "Returned"), 
+                     name = NULL
+)
+
+sum(is.na(mydata1_R_NR$STW) == TRUE) #N = 2 missing 
+sum(is.na(mydata1_R$STW) == TRUE)    #N = 0 missing 
+sum(is.na(mydata1_NR$STW) == TRUE)   #N = 2 missing 
+
+outliers_stw_R <- boxplot.stats(mydata1_R$STW)$out
+outliers_stw_NR <- boxplot.stats(mydata1_NR$STW)$out
+
+mydata1_R_NR$STW[mydata1_R_NR$return_code == 1 & mydata1_R_NR$STW %in% outliers_stw_R] <- NA
+mydata1_R_NR$STW[mydata1_R_NR$return_code == 0 & mydata1_R_NR$STW %in% outliers_stw_NR] <- NA
+
+mydata1_R <- mydata1_R_NR[mydata1_R_NR$phase == 1 & mydata1_R_NR$return_code == 1, ]
+mydata1_NR <- mydata1_R_NR[mydata1_R_NR$phase == 1 & mydata1_R_NR$return_code == 0, ]
+
+sum(!is.na(mydata1_R_NR$STW) == TRUE)
+sum(!is.na(mydata1_R$STW) == TRUE) 
+sum(!is.na(mydata1_NR$STW) == TRUE) 
+
+t.test(mydata1_R$STW, mydata1_NR$STW, paired = FALSE)
+wilcox.test(STW ~ return_code, data = mydata1_R_NR)
+```
+
+## STW Selectivity 
+```{r}
+clean_data <- na.omit(mydata1_R_NR[, c("STW", "Age", "education_years", "return_code", "sex")])
+clean_data$return_code <- as.factor(clean_data$return_code)
+clean_data$sex <- as.factor(clean_data$sex)
+
+stw_model <- lm(STW ~ poly(Age,2), data = clean_data)
+clean_data$regressed_stw <- residuals(stw_model, na.rm = TRUE)
+
+returners_residuals <- clean_data$regressed_stw[clean_data$return_code == "1"]
+cc700_residuals     <- clean_data$regressed_stw
+
+(mean(returners_residuals) - mean(cc700_residuals)) / sd(cc700_residuals)
+(mean(mydata1_R$STW, na.rm = TRUE) - (mean(mydata1_R_NR$STW, na.rm = TRUE)))/sd(mydata1_R_NR$STW, na.rm = TRUE)
+
+m_stw <-lm(STW ~ return_code*poly(Age,2)*scale(education_years)*sex , data = clean_data)
+summary(m_stw)
+car::Anova(m_stw, type=3)
+```
+## STW Attrition and ICC
+```{r}
+df_stw <- mydata %>% 
+  filter(group %in% c("G2", "G3"),
+         phase %in% c(1, 4, 5)) %>% 
+  group_by(CC.ID) %>% 
+  filter(sum(!is.na(STW)) >= 2) %>% 
+  ungroup()
+
+df_stw <- df_stw %>%
+  group_by(CC.ID) %>%
+  mutate(A0 = as.numeric(Age[wave == '0']), 
+         dA = as.numeric(Age - A0))
+
+df_stw$prac <- 1
+df_stw$prac[str_detect(df_stw$wave, "0")] <- 0
+df_stw$prac   <- factor(df_stw$prac)
+df_stw$format <- factor(df_stw$format)
+df_stw$format <- ifelse(df_stw$wave == 0 & is.na(df_stw$format), 1, df_stw$format)
+
+CC.ID <- df_stw$CC.ID[df_stw$wave == 0]
+C0    <- df_stw$STW[df_stw$wave == 0]
+C1    <- df_stw$STW[df_stw$wave == 1]
+C2    <- df_stw$STW[df_stw$wave == 2]
+educ  <- df_stw$education_years[df_stw$wave == 0]
+sex   <- df_stw$sex[df_stw$wave == 0]
+A0    <- df_stw$Age[df_stw$wave == 0]
+
+feature_matrix <- data.frame(CC.ID, C0, C1, C2, A0, sex, educ)
+
+set.seed(987)
+iso <- isolation.forest(feature_matrix[, c("C0", "C1", "C2", "A0")], ntrees = 100, sample_size = 128, nthreads = 1)
+
+feature_matrix$pred <- predict(iso, feature_matrix[, c("C0", "C1", "C2", "A0")])
+outliers <- feature_matrix[feature_matrix$pred > 0.60, c("CC.ID", "C0", "C1", "C2", "A0", "pred")]
+outliers_stw <- outliers
+
+plot_outliers(df_stw, "Age", "STW", "Age", "STW", min(df_stw$STW), max(df_stw$STW), outliers = outliers_stw)
+
+df_stw$STW[df_stw$CC.ID %in% outliers_stw$CC.ID] <- NA
+
+m_STW = lmer('scale(STW) ~ scale(A0)*scale(dA)*group + scale(A0)*scale(education_years)*sex + format + prac + scale(A0):prac + (1|CC.ID)', data = df_stw, REML = TRUE)
+summary(m_STW)
+
+wide <- pivot_wider(df_stw[df_stw$group == "G3" & df_stw$wave %in% c(0, 2),],
+  id_cols = CC.ID,
+  names_from = wave,
+  values_from = STW)
+mat <- wide[, -1]
+icc(mat, model = "twoway", type = "consistency", unit = "single")
+
+#sensitivity check
+df_sub <- df_stw[df_stw$group == "G3", ]
+mod <- lmer(STW ~ 1 + (1 | CC.ID), data = df_sub)
+vc <- as.data.frame(VarCorr(mod))
+ICC_C <- vc$vcov[vc$grp == "CC.ID"] /
+         (vc$vcov[vc$grp == "CC.ID"] + vc$vcov[vc$grp == "Residual"])
+ICC_C
+```
+
+# VERBAL EPISODIC MEMORY 
+```{r}
+ggplot(mydata1_R_NR, aes(x = Age, y = mem_imm, color = return_code)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE , size = 1) +
+  labs(x = "Age", y = "Memory Adj") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    panel.grid.major = element_line(color = "grey85", size = 0.5),
+    panel.grid.minor = element_line(color = "grey90", size = 0.25)
+  ) +
+  scale_color_manual(values = c("darkorange", "#570861"), labels = c("0" = "Not Returned", "1" = "Returned"),
+                     name = NULL
+)
+
+ggplot(mydata1_R_NR, aes(x = Age, y = mem_del, color = return_code)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE , size = 1) +
+  labs(x = "Age", y = "Memory Adj") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    panel.grid.major = element_line(color = "grey85", size = 0.5),
+    panel.grid.minor = element_line(color = "grey90", size = 0.25)
+  ) +
+  scale_color_manual(values = c("darkorange", "#570861"), labels = c("0" = "Not Returned", "1" = "Returned"),
+                     name = NULL
+)
+
+outliers_mem_imm_R  <- boxplot.stats(mydata1_R$mem_imm)$out
+outliers_mem_imm_NR <- boxplot.stats(mydata1_NR$mem_imm)$out
+
+mydata1_R_NR$mem_imm[mydata1_R_NR$return_code == 1 & mydata1_R_NR$mem_imm %in% outliers_mem_imm_R] <- NA
+mydata1_R_NR$mem_imm[mydata1_R_NR$return_code == 0 & mydata1_R_NR$mem_imm %in% outliers_mem_imm_NR] <- NA
+
+outliers_mem_del_R  <- boxplot.stats(mydata1_R$mem_del)$out
+outliers_mem_del_NR <- boxplot.stats(mydata1_NR$mem_del)$out
+
+mydata1_R_NR$mem_del[mydata1_R_NR$return_code == 1 & mydata1_R_NR$mem_del %in% outliers_mem_del_R] <- NA
+mydata1_R_NR$mem_del[mydata1_R_NR$return_code == 0 & mydata1_R_NR$mem_del %in% outliers_mem_del_NR] <- NA
+
+wilcox.test(mem_imm ~ return_code, data = mydata1_R_NR)
+wilcox.test(mem_del ~ return_code, data = mydata1_R_NR)
+```
+
+## Memory Selectivity
+```{r}
+#selectivity age-driven 
+(mean(mydata1_R$mem_imm, na.rm = TRUE) - (mean(mydata1_R_NR$mem_imm, na.rm = TRUE)))/sd(mydata1_R_NR$mem_imm, na.rm = TRUE)
+(mean(mydata1_R$mem_del, na.rm = TRUE) - (mean(mydata1_R_NR$mem_del, na.rm = TRUE)))/sd(mydata1_R_NR$mem_del, na.rm = TRUE)
+
+# selectivity age-orthogonal (and education-adjusted) for Imm
+clean_data <- na.omit(mydata1_R_NR[, c("mem_imm", "Age", "education_years", "return_code")])
+imm_model <- lm(mem_imm ~ poly(Age,2), data = clean_data)
+clean_data$regressed_imm <- residuals(imm_model, na.rm = TRUE)
+
+returners_residuals <- clean_data$regressed_imm[clean_data$return_code == "1"]
+cc700_residuals     <- clean_data$regressed_imm
+(mean(returners_residuals) - mean(cc700_residuals)) / sd(cc700_residuals)
+
+m_mem <-lm(mem_imm ~ return_code*poly(Age,2)*scale(education_years) , data = clean_data)
+summary(m_mem)
+car::Anova(m_mem, type=3, statistic = F)
+
+# selectivity age-orthogonal (and education-adjusted) for Del
+clean_data <- na.omit(mydata1_R_NR[, c("mem_del", "Age", "education_years", "return_code")])
+del_model <- lm(mem_del ~ poly(Age,2), data = clean_data)
+clean_data$regressed_del <- residuals(del_model, na.rm = TRUE)
+
+returners_residuals <- clean_data$regressed_del[clean_data$return_code == "1"]
+cc700_residuals     <- clean_data$regressed_del
+(mean(returners_residuals) - mean(cc700_residuals)) / sd(cc700_residuals)
+
+m_mem <-lm(mem_del ~ return_code*poly(Age,2)*scale(education_years) , data = clean_data)
+summary(m_mem)
+car::Anova(m_mem, type=3, statistic = F)
+```
+## Memory ICC 
+```{r}
+df_mem <- mydata %>% 
+  filter(group %in% c("G2", "G3"),
+         phase %in% c(1, 4, 5)) %>% 
+  group_by(CC.ID) %>% 
+  filter(sum(!is.na(mem_imm) & !is.na(mem_del)) >= 2) %>% 
+  ungroup()
+
+df_mem <- df_mem %>%
+  group_by(CC.ID) %>%
+  mutate(A0 = as.numeric(Age[wave == '0']), 
+         dA = as.numeric(Age - A0))
+
+df_mem$prac <- 1
+df_mem$prac[str_detect(df_mem$wave, "0")] <- 0
+df_mem$prac   <- factor(df_mem$prac)
+df_mem$format <- factor(df_mem$format)
+df_mem$format <- ifelse(df_mem$wave == 0 & is.na(df_mem$format), 1, df_mem$format)
+
+CC.ID <- df_mem$CC.ID[df_mem$wave == 0]
+C0    <- df_mem$mem_imm[df_mem$wave == 0]
+C1    <- df_mem$mem_imm[df_mem$wave == 1]
+C2    <- df_mem$mem_imm[df_mem$wave == 2]
+C0_1  <- df_mem$mem_del[df_mem$wave == 0]
+C1_1  <- df_mem$mem_del[df_mem$wave == 1]
+C2_1  <- df_mem$mem_del[df_mem$wave == 2]
+educ  <- df_mem$education_years[df_mem$wave == 0]
+sex   <- df_mem$sex[df_mem$wave == 0]
+A0    <- df_mem$Age[df_mem$wave == 0]
+
+feature_matrix <- data.frame(CC.ID, C0, C1, C2, C0_1, C1_1, C2_1, A0, sex, educ)
+
+set.seed(987)
+iso <- isolation.forest(feature_matrix[, c("C0", "C1", "C2", "C0_1", "C1_1", "C2_1", "A0")], ntrees = 100, sample_size = 128, nthreads = 1)
+
+feature_matrix$pred <- predict(iso, feature_matrix[, c("C0", "C1", "C2", "C0_1", "C1_1", "C2_1", "A0")])
+outliers <- feature_matrix[feature_matrix$pred > 0.60, c("CC.ID", "C0", "C1", "C2", "C0_1", "C1_1", "C2_1", "A0", "pred")]
+outliers_mem <- outliers
+
+plot_outliers(df_mem, "Age", "mem_imm", "Age", "Memory Imm", min(df_mem$mem_imm), max(df_mem$mem_imm), outliers = outliers_mem)
+plot_outliers(df_mem, "Age", "mem_imm", "Age", "Memory Del", min(df_mem$mem_del), max(df_mem$mem_del), outliers = outliers_mem)
+
+df_mem$mem_imm[df_mem$CC.ID %in% outliers_mem$CC.ID] <- NA
+df_mem$mem_del[df_mem$CC.ID %in% outliers_mem$CC.ID] <- NA
+
+m_imm = lmer('scale(mem_imm) ~ scale(A0)*scale(dA)*group + scale(A0)*scale(education_years)*sex + format + prac + scale(A0):prac + (1|CC.ID)', data = df_mem, REML = TRUE)
+summary(m_imm)
+
+wide <- pivot_wider(df_mem[df_mem$group == "G3" & df_mem$wave %in% c(0, 2),],
+  id_cols = CC.ID,
+  names_from = wave,
+  values_from = mem_imm)
+mat <- wide[, -1]
+icc(mat, model = "twoway", type = "consistency", unit = "single")
+
+wide <- pivot_wider(df_mem[df_mem$group == "G3" & df_mem$wave %in% c(0, 2),],
+  id_cols = CC.ID,
+  names_from = wave,
+  values_from = mem_del)
+mat <- wide[, -1]
+icc(mat, model = "twoway", type = "consistency", unit = "single")
+
+# #sensitivity check
+# df_sub <- df_mem[df_mem$group == "G3", ]
+# mod <- lmer(mem_imm ~ 1 + (1 | CC.ID), data = df_sub)
+# summary(mod)
+# vc <- as.data.frame(VarCorr(mod))
+# ICC_C <- vc$vcov[vc$grp == "CC.ID"] /
+#          (vc$vcov[vc$grp == "CC.ID"] + vc$vcov[vc$grp == "Residual"])
+# ICC_C
+# 
+# #sensitivity check
+# mod <- lmer(mem_imm ~ 1 + (1 | CC.ID), data = df_mem)
+# summary(mod)
+# vc <- as.data.frame(VarCorr(mod))
+# var_between <- vc$vcov[vc$grp == "CC.ID"]
+# var_within  <- vc$vcov[vc$grp == "Residual"]
+# ICC_C <- var_between / (var_between + var_within)
+# ICC_C
+```
+
+# SPEED (inverse Reaction Time)
+```{r}
+# outliers RT
+outliers_rt_simple_R <- boxplot.stats(mydata1_R$simple_speed)$out
+outliers_rt_simple_NR <- boxplot.stats(mydata1_NR$simple_speed)$out
+
+mydata1_R_NR$simple_speed[mydata1_R_NR$return_code == 1 & mydata1_R_NR$simple_speed %in% outliers_rt_simple_R] <- NA
+mydata1_R_NR$simple_speed[mydata1_R_NR$return_code == 0 & mydata1_R_NR$simple_speed %in% outliers_rt_simple_NR] <- NA
+
+outliers_rt_choice_R <- boxplot.stats(mydata1_R$choice_speed)$out
+outliers_rt_choice_NR <- boxplot.stats(mydata1_NR$choice_speed)$out
+
+mydata1_R_NR$choice_speed[mydata1_R_NR$return_code == 1 & mydata1_R_NR$choice_speed %in% outliers_rt_choice_R] <- NA
+mydata1_R_NR$choice_speed[mydata1_R_NR$return_code == 0 & mydata1_R_NR$choice_speed %in% outliers_rt_choice_NR] <- NA
+
+wilcox.test(simple_speed ~ return_code, data = mydata1_R_NR)
+wilcox.test(choice_speed ~ return_code, data = mydata1_R_NR)
+```
+
+## Speed Selectivity
+```{r}
+# selectivity age-driven
+(mean(mydata1_R$simple_speed, na.rm = TRUE) - (mean(mydata1_R_NR$simple_speed, na.rm = TRUE)))/sd(mydata1_R_NR$simple_speed, na.rm = TRUE)
+(mean(mydata1_R$choice_speed, na.rm = TRUE) - (mean(mydata1_R_NR$choice_speed, na.rm = TRUE)))/sd(mydata1_R_NR$choice_speed, na.rm = TRUE)
+
+# selectivity age-orthogonal
+clean_data <- na.omit(mydata1_R_NR[, c("simple_speed", "education_years", "return_code", "Age", "sex")])
+
+rt_model <- lm(simple_speed ~ poly(Age,2), data = clean_data)
+clean_data$regressed_simple <- residuals(rt_model, na.rm = TRUE)
+returners_residuals <- clean_data$regressed_simple[clean_data$return_code == "1"]
+cc700_residuals <- clean_data$regressed_simple
+(mean(returners_residuals) - mean(cc700_residuals)) / sd(cc700_residuals)
+
+rt_m <-lm(simple_speed ~ return_code*poly(Age,2)*scale(education_years) , data = clean_data)
+summary(rt_m)
+car::Anova(rt_m, type=3, statistic = F)
+
+# selectivity age-orthogonal choice
+clean_data <- na.omit(mydata1_R_NR[, c("choice_speed", "education_years", "return_code", "Age")])
+
+rt_model <- lm(choice_speed ~ poly(Age,2), data = clean_data)
+clean_data$regressed_choice <- residuals(rt_model, na.rm = TRUE)
+returners_residuals <- clean_data$regressed_choice[clean_data$return_code == "1"]
+cc700_residuals <- clean_data$regressed_choice
+(mean(returners_residuals) - mean(cc700_residuals)) / sd(cc700_residuals)
+
+rt_m <-lm(choice_speed ~ return_code*poly(Age,2)*scale(education_years) , data = clean_data)
+summary(rt_m)
+car::Anova(rt_m, type=3, statistic = F)
+```
+
+## Speed ICC
+```{r}
+df_speed <- mydata %>% 
+  filter(group %in% c("G2", "G3"),
+         phase %in% c(1, 4, 5)) %>% 
+  group_by(CC.ID) %>% 
+  filter(sum(!is.na(simple_speed) & !is.na(choice_speed)) >= 2) %>% 
+  ungroup()
+
+df_speed <- df_speed %>%
+  group_by(CC.ID) %>%
+  mutate(A0 = as.numeric(Age[wave == '0']), 
+         dA = as.numeric(Age - A0))
+
+df_speed$prac <- 1
+df_speed$prac[str_detect(df_speed$wave, "0")] <- 0
+df_speed$prac   <- factor(df_speed$prac)
+df_speed$format <- factor(df_speed$format)
+df_speed$format <- ifelse(df_speed$wave == 0 & is.na(df_speed$format), 1, df_speed$format)
+
+CC.ID <- df_speed$CC.ID[df_speed$wave == 0]
+C0    <- df_speed$simple_speed[df_speed$wave == 0]
+C1    <- df_speed$simple_speed[df_speed$wave == 1]
+C2    <- df_speed$simple_speed[df_speed$wave == 2]
+C0_1  <- df_speed$choice_speed[df_speed$wave == 0]
+C1_1  <- df_speed$choice_speed[df_speed$wave == 1]
+C2_1  <- df_speed$choice_speed[df_speed$wave == 2]
+educ  <- df_speed$education_years[df_speed$wave == 0]
+sex   <- df_speed$sex[df_speed$wave == 0]
+A0    <- df_speed$Age[df_speed$wave == 0]
+
+feature_matrix <- data.frame(CC.ID, C0, C1, C2, C0_1, C1_1, C2_1, A0, sex, educ)
+
+set.seed(987)
+iso <- isolation.forest(feature_matrix[, c("C0", "C1", "C2", "C0_1", "C1_1", "C2_1", "A0")], ntrees = 100, sample_size = 128, nthreads = 1)
+
+feature_matrix$pred <- predict(iso, feature_matrix[, c("C0", "C1", "C2", "C0_1", "C1_1", "C2_1", "A0")])
+outliers <- feature_matrix[feature_matrix$pred > 0.60, c("CC.ID", "C0", "C1", "C2", "C0_1", "C1_1", "C2_1", "A0", "pred")]
+outliers_speed <- outliers
+
+plot_outliers(df_speed, "Age", "simple_speed", "Age", "Simple Speed", min(df_speed$simple_speed), max(df_speed$simple_speed), outliers = outliers_speed)
+plot_outliers(df_speed, "Age", "choice_speed", "Age", "Choice Speed", min(df_speed$choice_speed), max(df_speed$choice_speed), outliers = outliers_speed)
+
+df_speed$simple_speed[df_speed$CC.ID %in% outliers_speed$CC.ID] <- NA
+df_speed$choice_speed[df_speed$CC.ID %in% outliers_speed$CC.ID] <- NA
+
+m_simple = lmer('scale(simple_speed) ~ scale(A0)*scale(dA)*group + scale(A0)*scale(education_years)*sex + format + prac + scale(A0):prac + (1|CC.ID)', data = df_speed, REML = TRUE)
+summary(m_simple)
+
+m_choice = lmer('scale(choice_speed) ~ scale(A0)*scale(dA)*group + scale(A0)*scale(education_years)*sex + format + prac + scale(A0):prac + (1|CC.ID)', data = df_speed, REML = TRUE)
+summary(m_choice)
+
+wide <- pivot_wider(df_speed[df_speed$group == "G3" & df_speed$wave %in% c(0, 2),],
+  id_cols = CC.ID,
+  names_from = wave,
+  values_from = simple_speed)
+mat <- wide[, -1]
+icc(mat, model = "twoway", type = "consistency", unit = "single")
+
+wide <- pivot_wider(df_speed[df_speed$group == "G3" & df_speed$wave %in% c(0, 2),],
+  id_cols = CC.ID,
+  names_from = wave,
+  values_from = choice_speed)
+mat <- wide[, -1]
+icc(mat, model = "twoway", type = "consistency", unit = "single")
+
+```
+
+
